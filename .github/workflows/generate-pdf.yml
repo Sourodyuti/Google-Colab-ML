@@ -1,0 +1,86 @@
+name: Generate Assignment PDF
+
+on:
+  push:
+    paths:
+      - '**.ipynb'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-pdf:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Rendering Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install nbconvert playwright
+          playwright install --with-deps chromium
+
+      - name: Identify Modified Notebooks and Render PDFs
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            FILES=$(find . -maxdepth 2 -name "*.ipynb" -not -path "*/.*")
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ] || [ -z "${{ github.event.before }}" ]; then
+            FILES=$(git diff-tree --no-commit-id --name-only -r HEAD | grep '\.ipynb$' || true)
+            if [ -z "$FILES" ]; then
+              FILES=$(find . -maxdepth 2 -name "*.ipynb" -not -path "*/.*")
+            fi
+          else
+            FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '\.ipynb$' || true)
+          fi
+
+          if [ -z "$FILES" ]; then
+            echo "No .ipynb files detected."
+            exit 0
+          fi
+
+          mkdir -p output_pdfs
+
+          for file in $FILES; do
+            if [ -f "$file" ]; then
+              base_name=$(basename "$file" .ipynb)
+              html_file="output_pdfs/${base_name}.html"
+              pdf_file="output_pdfs/${base_name}.pdf"
+
+              echo "Converting $file -> $pdf_file"
+
+              # Convert notebook to static HTML preserving existing code and output cells
+              jupyter nbconvert --to html "$file" --output-dir="output_pdfs"
+
+              # Render HTML to PDF via headless Chromium
+              python3 .github/scripts/convert.py "$html_file" "$pdf_file"
+
+              rm "$html_file"
+            fi
+          done
+
+      - name: Upload PDF Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: assignment-pdfs
+          path: output_pdfs/*.pdf
+          retention-days: 30
+
+      - name: Publish PDF to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: latest-pdf
+          name: Latest Assignment PDFs
+          files: output_pdfs/*.pdf
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
